@@ -10,7 +10,7 @@ import tkinter as tk
 from tkinter import filedialog as fd
 
 from b1500a.config import UNITS
-from b1500a.parse import IVSweep, GateSweep
+from b1500a.parse import DataFile, IVSweep, GateSweep, MultiDataFile
 from b1500a.utils import avg_lin_fit, avg_parab_fit
 
 class App(tk.Frame):
@@ -53,9 +53,13 @@ class App(tk.Frame):
         self.test_type_label.grid(column=0, row=0, columnspan=1, sticky="wens")
 
         self.test_type_str = tk.StringVar(self.file_input_frame)
-        self.test_type_str.set("IV Sweep")
+        self.test_type_str.set("Raw File")
 
-        self.test_type_dd = tk.OptionMenu(self.file_input_frame, self.test_type_str, *["IV Sweep", "Gate Sweep"])
+        self.test_type_dd = tk.OptionMenu(
+            self.file_input_frame,
+            self.test_type_str,
+            *["Raw File", "Multi Raw File", "IV Sweep", "Gate Sweep"],
+        )
         self.test_type_dd.grid(column=1, row=0, columnspan=2, sticky="wens")
 
         """
@@ -137,7 +141,6 @@ class App(tk.Frame):
             self.file_names = [i for i in os.listdir(self.folder) if i.endswith(".csv")]
             self.files = [os.path.join(self.folder, i) for i in self.file_names]
             self.save_folder_var.set(os.path.join(self.folder, "modified_csv"))
-        self.file_name_label["text"] = ",\n".join(self.file_names)
 
         test_type = self.test_type_str.get()
 
@@ -145,29 +148,47 @@ class App(tk.Frame):
             self.file_objects = [IVSweep(i) for i in self.files]
         elif test_type == "Gate Sweep":
             self.file_objects = [GateSweep(i) for i in self.files]
+        elif test_type == "Raw File":
+            self.file_objects = [DataFile(i) for i in self.files]
+        elif test_type == "Multi Raw File":
+            self.file_objects = [MultiDataFile(i) for i in self.files]
+
+        # update label text; for Multi Raw File, also show block counts
+        if test_type == "Multi Raw File":
+            label_lines = []
+            for fobj in self.file_objects:
+                num_blocks = len(getattr(fobj, "meas_blocks", []))
+                label_lines.append(f"{fobj.fname} (blocks: {num_blocks})")
+            self.file_name_label["text"] = ",\n".join(label_lines)
+        else:
+            self.file_name_label["text"] = ",\n".join(self.file_names)
 
     def _finish(self):
         """
         Finish button handler
         """
 
-        # adjust units
-        for i in self.file_objects:
-            i.change_units("V", self.volt_units_str.get())
-            i.change_units("I", self.curr_units_str.get())
+        test_type = self.test_type_str.get()
 
-        # saving .csv files
+        # adjust units (only for sweep types)
+        if test_type in ["IV Sweep", "Gate Sweep"]:
+            for i in self.file_objects:
+                i.change_units("V", self.volt_units_str.get())
+                i.change_units("I", self.curr_units_str.get())
+
+        # saving .csv files (all test types)
         if self.csv_var:
             if self.save_folder_var.get():
                 if not os.path.exists(self.save_folder_var.get()):
                     os.makedirs(self.save_folder_var.get())
                 for i in self.file_objects:
+                    # For Raw File, expect objects to provide save_csv as well
                     i.save_csv(os.path.join(self.save_folder_var.get(), i.fname))
             else:
                 print("Save folder location not specified!")
 
-        # saving stats
-        if self.test_type_str.get() == "IV Sweep":
+        # saving stats (only for sweep types)
+        if test_type == "IV Sweep":
             test_name = []
             res = []
             for i in self.file_objects:
@@ -177,7 +198,7 @@ class App(tk.Frame):
             res.append(np.mean(res))
             pd.DataFrame(data={"Test": test_name, "Resistance (ohms)": res}).to_csv(os.path.join(self.save_folder_var.get(), "stats.csv"), index=False)
 
-        elif self.test_type_str.get() == "Gate Sweep":
+        elif test_type == "Gate Sweep":
             test_name = []
             dirac = []
             for i in self.file_objects:
@@ -187,7 +208,10 @@ class App(tk.Frame):
             dirac.append(np.mean(dirac))
             pd.DataFrame(data={"Test": test_name, "Dirac Point (V)": dirac}).to_csv(os.path.join(self.save_folder_var.get(), "stats.csv"), index=False)
  
-        # plotting 
+        # plotting (only for sweep types)
+        if test_type not in ["IV Sweep", "Gate Sweep"]:
+            return
+
         if self.plot_num_var.get():
             for i in self.file_objects:
                 plt.plot(i.volts, i.current, label=f"{i.metadata['DeviceName']}-{i.metadata['RunNum']}")
