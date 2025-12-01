@@ -13,6 +13,40 @@ from b1500a.config import (
 )
 from b1500a.utils import extract_metadata
 
+
+def _load_csv_rows(fpath):
+    """Read a CSV-like text file into a list of stripped row lists."""
+
+    rows = []
+    with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            rows.append([item.strip() for item in line.rstrip("\n\r").split(",")])
+    return rows
+
+
+def _build_meas_dataframe(rows):
+    """Convert raw CSV rows into a measurement DataFrame."""
+
+    data_name_idx = None
+    for idx, row in enumerate(rows):
+        if row and row[0] == "DataName":
+            data_name_idx = idx
+            break
+
+    if data_name_idx is None or data_name_idx == len(rows) - 1:
+        return pd.DataFrame()
+
+    data_col_names = np.array(rows[data_name_idx])
+    meas_rows = rows[data_name_idx + 1 :]
+    meas_df = pd.DataFrame(meas_rows, columns=data_col_names)
+    if "DataName" in meas_df.columns:
+        meas_df = meas_df.drop(columns=["DataName"])
+    
+    # Convert all numeric columns to float for downstream calculations
+    meas_df = meas_df.apply(pd.to_numeric, errors="coerce")
+
+    return meas_df
+
 class DataFile:
     def __init__(self, fpath, smus=3):
         """
@@ -31,22 +65,12 @@ class DataFile:
         self.volts = []
         self.current = []
 
-        self.column_names = ["Category", "Measurement"] + [f"SMU{i}" for i in range(1, self.smus+1)]
-        self.all_data = pd.read_csv(self.fpath, names=self.column_names)
-        
-        self.data_col_names = np.array(self.all_data[self.all_data["Category"] == "DataName"].iloc[0].dropna())
-        self.meas_data = self.all_data[self.all_data["Category"] == "DataValue"].dropna(axis=1).reset_index(drop=True)
-        self.meas_data = self.meas_data.rename(
-            columns={i: j.strip() for i, j in zip(self.meas_data.columns, self.data_col_names)}
-        )
+        rows = _load_csv_rows(self.fpath)
+        self.meas_data = _build_meas_dataframe(rows)
 
     def save_csv(self, fpath):
-        """Save raw measurement data to CSV, excluding the DataName column if present."""
-
-        df = self.meas_data.copy()
-        if "DataName" in df.columns:
-            df = df.drop(columns=["DataName"])
-        df.to_csv(fpath, index=False)
+        """Save raw measurement data to CSV"""
+        self.meas_data.to_csv(fpath, index=False)
 
 
 class MultiDataFile(DataFile):
@@ -65,76 +89,42 @@ class MultiDataFile(DataFile):
         self.volts = []
         self.current = []
 
-        # read full CSV once
-        column_names = ["Category", "Measurement"] + [f"SMU{i}" for i in range(1, smus + 1)]
-        all_data = pd.read_csv(self.fpath, names=column_names)
-
-        # find indices where a new setup/file starts
-        setup_indices = all_data.index[all_data["Category"] == "SetupTitle"].tolist()
-        if not setup_indices:
-            # fallback: treat whole file as one DataFile
-            tmp = DataFile(fpath, smus)
-            self.all_data = tmp.all_data
-            self.meas_blocks = [tmp.meas_data]
-            self.meas_data = tmp.meas_data
-            return
+        all_rows = _load_csv_rows(self.fpath)
 
         self.meas_blocks = []
         self.block_titles = []
 
+        setup_indices = [idx for idx, row in enumerate(all_rows) if row and row[0] == "SetupTitle"]
+        if not setup_indices:
+            meas_data = _build_meas_dataframe(all_rows)
+            if not meas_data.empty:
+                self.meas_blocks.append(meas_data)
+            self.meas_data = meas_data
+            return
+
         for idx, start in enumerate(setup_indices):
-            end = setup_indices[idx + 1] if idx + 1 < len(setup_indices) else len(all_data)
-            sub_df = all_data.iloc[start:end]
+            end = setup_indices[idx + 1] if idx + 1 < len(setup_indices) else len(all_rows)
+            block_rows = all_rows[start:end]
 
-            # get SetupTitle (Measurement field on SetupTitle row)
-            setup_row = all_data.iloc[start]
-            setup_title = str(setup_row["Measurement"]) if "Measurement" in setup_row else ""
+            setup_row = all_rows[start]
+            setup_title = setup_row[1] if len(setup_row) > 1 else ""
 
-            # write this slice to a temporary in-memory CSV via DataFrame
-            # then reuse DataFile logic by constructing a DataFile-like object
-            # We mimic DataFile processing here to avoid extra IO.
-            data_name_rows = sub_df[sub_df["Category"] == "DataName"]
-            if data_name_rows.empty:
+            meas_data = _build_meas_dataframe(block_rows)
+            if meas_data.empty:
                 continue
 
-            data_col_names = np.array(data_name_rows.iloc[0].dropna())
-            meas_data = sub_df[sub_df["Category"] == "DataValue"].dropna(axis=1).reset_index(drop=True)
-            meas_data = meas_data.rename(
-                columns={i: j.strip() for i, j in zip(meas_data.columns, data_col_names)}
-            )
-            # add a column to identify which SetupTitle this block came from
             meas_data = meas_data.copy()
+            # Each row keeps a "SetupTitle" column indicating its source block.
             meas_data["SetupTitle"] = setup_title
 
             self.meas_blocks.append(meas_data)
             self.block_titles.append(setup_title)
 
-        # assemble all_data for this MultiDataFile (concatenate for reference)
-        self.all_data = all_data
-
-        # For compatibility with DataFile API, expose the first block as meas_data
-        self.meas_data = self.meas_blocks[0] if self.meas_blocks else pd.DataFrame()
-
-    def save_csv(self, fpath):
-        """Save all measurement blocks to one CSV, stacked vertically.
-
-        The DataName column is excluded if present in any block.
-        Each row keeps a "SetupTitle" column indicating its source block.
-        """
-
-        if not self.meas_blocks:
-            pd.DataFrame().to_csv(fpath, index=False)
-            return
-
-        cleaned_blocks = []
-        for df in self.meas_blocks:
-            block = df.copy()
-            if "DataName" in block.columns:
-                block = block.drop(columns=["DataName"])
-            cleaned_blocks.append(block)
-
-        full_df = pd.concat(cleaned_blocks, ignore_index=True)
-        full_df.to_csv(fpath, index=False)
+        # For compatibility with DataFile API, expose all blocks stacked together
+        if self.meas_blocks:
+            self.meas_data = pd.concat(self.meas_blocks, ignore_index=True)
+        else:
+            self.meas_data = pd.DataFrame()
 
 class IVSweep(DataFile):
     """
