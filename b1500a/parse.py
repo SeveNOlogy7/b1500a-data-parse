@@ -47,6 +47,21 @@ def _build_meas_dataframe(rows):
 
     return meas_df
 
+
+def _extract_test_parameters(rows):
+    """Extract TestParameter rows into a dictionary."""
+    params = {}
+    for row in rows:
+        if row and row[0] == "TestParameter" and len(row) > 1:
+            key = row[1]
+            values = row[2:]
+            if len(values) == 1:
+                params[key] = values[0]
+            else:
+                params[key] = values
+    return params
+
+
 class DataFile:
     def __init__(self, fpath, smus=3):
         """
@@ -67,6 +82,7 @@ class DataFile:
 
         rows = _load_csv_rows(self.fpath)
         self.meas_data = _build_meas_dataframe(rows)
+        self.params = _extract_test_parameters(rows)
 
     def save_csv(self, fpath):
         """Save raw measurement data to CSV"""
@@ -93,6 +109,7 @@ class MultiDataFile(DataFile):
 
         self.meas_blocks = []
         self.block_titles = []
+        self.block_params = []
 
         setup_indices = [idx for idx, row in enumerate(all_rows) if row and row[0] == "SetupTitle"]
         if not setup_indices:
@@ -100,6 +117,9 @@ class MultiDataFile(DataFile):
             if not meas_data.empty:
                 self.meas_blocks.append(meas_data)
             self.meas_data = meas_data
+            
+            self.params = _extract_test_parameters(all_rows)
+            self.block_params.append(self.params)
             return
 
         for idx, start in enumerate(setup_indices):
@@ -119,12 +139,15 @@ class MultiDataFile(DataFile):
 
             self.meas_blocks.append(meas_data)
             self.block_titles.append(setup_title)
+            self.block_params.append(_extract_test_parameters(block_rows))
 
         # For compatibility with DataFile API, expose all blocks stacked together
         if self.meas_blocks:
             self.meas_data = pd.concat(self.meas_blocks, ignore_index=True)
+            self.params = self.block_params[0]
         else:
             self.meas_data = pd.DataFrame()
+            self.params = {}
 
 class IVSweep(DataFile):
     """
