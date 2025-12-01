@@ -11,7 +11,6 @@ from b1500a.config import (
     GATESWEEP_VOLT_COL,
     GATESWEEP_CURR_COL,
 )
-from b1500a.utils import extract_metadata
 
 
 def _load_csv_rows(fpath):
@@ -62,6 +61,44 @@ def _extract_test_parameters(rows):
     return params
 
 
+def _extract_metadata_from_rows(rows):
+    """Extract metadata from CSV rows."""
+    metadata = {
+        "TestName": None,
+        "DeviceName": None,
+        "RunNum": None,
+        "Date": None,
+        "Time": None,
+        "LinkKey": None
+    }
+    
+    for row in rows:
+        if not row:
+            continue
+        
+        if row[0] == "SetupTitle" and len(row) > 1:
+            metadata["TestName"] = row[1]
+            
+        if row[0] == "MetaData" and len(row) > 2:
+            key = row[1]
+            value = row[2]
+            
+            if key == "TestRecord.TestTarget":
+                metadata["DeviceName"] = value
+            elif key == "TestRecord.IterationIndex":
+                metadata["RunNum"] = value
+            elif key == "TestRecord.RecordTime":
+                parts = value.split()
+                if len(parts) >= 1:
+                    metadata["Date"] = parts[0]
+                if len(parts) >= 2:
+                    metadata["Time"] = " ".join(parts[1:])
+            elif key == "TestRecord.LinkKey":
+                metadata["LinkKey"] = value
+                
+    return metadata
+
+
 class DataFile:
     def __init__(self, fpath, smus=3):
         """
@@ -76,11 +113,11 @@ class DataFile:
         self.fpath = fpath
         self.fname = os.path.basename(fpath)
         self.smus = smus
-        self.metadata = extract_metadata(os.path.basename(fpath))
         self.volts = []
         self.current = []
 
         rows = _load_csv_rows(self.fpath)
+        self.metadata = _extract_metadata_from_rows(rows)
         self.meas_data = _build_meas_dataframe(rows)
         self.params = _extract_test_parameters(rows)
 
@@ -101,7 +138,6 @@ class MultiDataFile(DataFile):
         self.fpath = fpath
         self.fname = os.path.basename(fpath)
         self.smus = smus
-        self.metadata = extract_metadata(os.path.basename(fpath))
         self.volts = []
         self.current = []
 
@@ -110,6 +146,7 @@ class MultiDataFile(DataFile):
         self.meas_blocks = []
         self.block_titles = []
         self.block_params = []
+        self.block_metadata = []
 
         setup_indices = [idx for idx, row in enumerate(all_rows) if row and row[0] == "SetupTitle"]
         if not setup_indices:
@@ -119,7 +156,9 @@ class MultiDataFile(DataFile):
             self.meas_data = meas_data
             
             self.params = _extract_test_parameters(all_rows)
+            self.metadata = _extract_metadata_from_rows(all_rows)
             self.block_params.append(self.params)
+            self.block_metadata.append(self.metadata)
             return
 
         for idx, start in enumerate(setup_indices):
@@ -140,14 +179,17 @@ class MultiDataFile(DataFile):
             self.meas_blocks.append(meas_data)
             self.block_titles.append(setup_title)
             self.block_params.append(_extract_test_parameters(block_rows))
+            self.block_metadata.append(_extract_metadata_from_rows(block_rows))
 
         # For compatibility with DataFile API, expose all blocks stacked together
         if self.meas_blocks:
             self.meas_data = pd.concat(self.meas_blocks, ignore_index=True)
             self.params = self.block_params[0]
+            self.metadata = self.block_metadata[0]
         else:
             self.meas_data = pd.DataFrame()
             self.params = {}
+            self.metadata = {}
 
 class IVSweep(DataFile):
     """
